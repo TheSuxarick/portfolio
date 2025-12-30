@@ -3,14 +3,33 @@
 
 // ===== CONFIGURATION =====
 // Model selection - change here to test different models
-// Fast models: gemini-2.5-flash, gemini-1.5-flash
-// Slower but smarter: gemini-3-flash-preview, gemini-pro
-const PRIMARY_MODEL = 'gemini-2.5-flash';
-const FALLBACK_MODEL = 'gemini-1.5-flash';
+// Fast models: gemini-2.0-flash-exp, gemini-1.5-flash-latest
+// Slower but smarter: gemini-2.0-flash-thinking-exp-01-21
+const PRIMARY_MODEL = 'gemini-2.0-flash-exp';
+const FALLBACK_MODEL = 'gemini-1.5-flash-latest';
 
 // Performance settings
 const DISABLE_THINKING = true; // Set to false to enable thinking (slower but smarter)
 const MAX_TOKENS = 500; // Limit response length for faster responses
+
+// ===== API KEY ROTATION =====
+// Add multiple API keys - will rotate through them if one fails
+// Get keys from: https://aistudio.google.com/apikey
+const API_KEYS = [
+  'GEMINI_API_KEY',      // Main key (from Script Properties)
+  'GEMINI_API_KEY_2',    // Backup key 1
+  'GEMINI_API_KEY_3'     // Backup key 2
+  // Add more as needed
+];
+
+// ===== RATE LIMITING CONFIGURATION =====
+const ENABLE_RATE_LIMITING = true; // ⚠️ SET TO FALSE WHEN TESTING/DEVELOPING
+const MAX_REQUESTS_PER_HOUR = 20; // Maximum requests per user per hour
+const MAX_REQUESTS_PER_DAY = 100; // Maximum requests per user per day
+
+// Whitelist - No rate limiting for these
+const WHITELISTED_IPS = ['172.16.255.61']; // Your local IP - add more if needed
+const ALLOW_LOCALHOST = true; // Bypass rate limit when accessing from localhost/127.0.0.1
 
 // ===== END CONFIGURATION =====
 
@@ -19,6 +38,17 @@ function doPost(e) {
   let language = 'en';
   
   try {
+    // Check rate limit first
+    if (ENABLE_RATE_LIMITING) {
+      const rateLimitCheck = checkRateLimit(e);
+      if (!rateLimitCheck.allowed) {
+        return createResponse({
+          success: false,
+          error: rateLimitCheck.message
+        });
+      }
+    }
+    
     // Debug: Log what we received
     Logger.log('Received data type: ' + typeof e.postData);
     Logger.log('Has postData.contents: ' + (e.postData && e.postData.contents ? 'yes' : 'no'));
@@ -77,16 +107,27 @@ function doPost(e) {
       });
     }
     
-    // Get your Gemini API key from Script Properties
-    // To set it: File > Project Settings > Script Properties > Add "GEMINI_API_KEY"
-    const API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+    // Get API keys from Script Properties with rotation support
+    const scriptProperties = PropertiesService.getScriptProperties();
+    const availableApiKeys = [];
     
-    if (!API_KEY) {
+    API_KEYS.forEach(keyName => {
+      const key = scriptProperties.getProperty(keyName);
+      if (key) {
+        availableApiKeys.push(key);
+      }
+    });
+    
+    if (availableApiKeys.length === 0) {
       return createResponse({
         success: false,
-        error: 'API key not configured. Please set GEMINI_API_KEY in Script Properties.'
+        error: language === 'en'
+          ? 'API keys not configured. Please set API keys in Script Properties.'
+          : 'API ключи не настроены. Пожалуйста, настройте ключи API.'
       });
     }
+    
+    Logger.log(`Found ${availableApiKeys.length} API key(s) available`);
     
     // Get knowledge base about you
     const knowledgeBase = getKnowledgeBase(language);
@@ -105,81 +146,95 @@ function doPost(e) {
     // Create prompt with context and conversation history
     const prompt = `${knowledgeBase}${conversationContext}User asks: ${userQuestion}\n\nAnswer in ${language === 'en' ? 'English' : 'Russian'}, be friendly and concise. Remember the conversation context if relevant:`;
     
-    // Call Gemini API with retry logic
-    const models = [PRIMARY_MODEL, FALLBACK_MODEL]; // Fast models first
+    // Call Gemini API with retry logic and API key rotation
+    const models = [PRIMARY_MODEL, FALLBACK_MODEL];
     let response = null;
     let lastError = null;
     let success = false;
+    let apiKeyIndex = 0;
+    let hit429 = false; // Track if we hit rate limit
     
-    for (let attempt = 0; attempt < models.length && !success; attempt++) {
-      const modelId = models[attempt];
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${API_KEY}`;
+    // Try each model with each API key
+    for (let modelAttempt = 0; modelAttempt < models.length && !success; modelAttempt++) {
+      const modelId = models[modelAttempt];
       
-      // Optimized payload for speed
-      const requestPayload = {
-        contents: [{
-          role: 'user',
-          parts: [{
-            text: prompt
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.7,
-          topP: 0.8,
-          topK: 40,
-          maxOutputTokens: MAX_TOKENS // Limit response length for speed
-        }
-      };
-      
-      // Disable thinking for faster responses (Gemini 2.5+)
-      if (DISABLE_THINKING && (modelId.includes('2.5') || modelId.includes('3'))) {
-        requestPayload.generationConfig.thinkingConfig = {
-          thinkingBudget: 0 // Disable thinking for speed
+      // Try each API key for this model
+      for (let keyAttempt = 0; keyAttempt < availableApiKeys.length && !success; keyAttempt++) {
+        const apiKey = availableApiKeys[keyAttempt];
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+        
+        // Optimized payload for speed
+        const requestPayload = {
+          contents: [{
+            role: 'user',
+            parts: [{
+              text: prompt
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.7,
+            topP: 0.8,
+            topK: 40,
+            maxOutputTokens: MAX_TOKENS
+          }
         };
+        
+        // Disable thinking for faster responses (Gemini 2.0+)
+        if (DISABLE_THINKING && (modelId.includes('2.') || modelId.includes('3.'))) {
+          requestPayload.generationConfig.thinkingConfig = {
+            thinkingBudget: 0
+          };
+        }
+        
+        requestPayload.safetySettings = [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ];
+        
+        Logger.log(`Model ${modelAttempt + 1}/${models.length}, API Key ${keyAttempt + 1}/${availableApiKeys.length}: ${modelId}`);
+        
+        try {
+          response = callGeminiWithRetry(apiUrl, requestPayload, 1); // Only 1 retry per key
+          
+          if (response) {
+            Logger.log(`✅ Success with model ${modelId} using API key ${keyAttempt + 1}`);
+            success = true;
+          }
+        } catch (error) {
+          const errorMsg = error.toString();
+          Logger.log(`❌ Failed: ${errorMsg.substring(0, 100)}`);
+          
+          // Check if it's a 429 error (rate limit)
+          if (errorMsg.includes('429')) {
+            hit429 = true;
+            Logger.log(`Rate limit hit on API key ${keyAttempt + 1}, trying next key...`);
+            // Don't wait, immediately try next key
+            continue;
+          }
+          
+          lastError = error;
+          
+          // Wait a bit before trying next key (but not for 429)
+          if (keyAttempt < availableApiKeys.length - 1) {
+            Utilities.sleep(500);
+          }
+        }
       }
       
-      requestPayload.safetySettings = [
-        {
-          category: 'HARM_CATEGORY_HARASSMENT',
-          threshold: 'BLOCK_NONE'
-        },
-        {
-          category: 'HARM_CATEGORY_HATE_SPEECH',
-          threshold: 'BLOCK_NONE'
-        },
-        {
-          category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT',
-          threshold: 'BLOCK_NONE'
-        },
-        {
-          category: 'HARM_CATEGORY_DANGEROUS_CONTENT',
-          threshold: 'BLOCK_NONE'
-        }
-      ];
-      
-      Logger.log(`Attempt ${attempt + 1}: Calling Gemini API with model: ${modelId} (thinking: ${DISABLE_THINKING ? 'disabled' : 'enabled'})`);
-      
-      try {
-        // Try with retries for this model (reduced to 2 retries for speed)
-        response = callGeminiWithRetry(apiUrl, requestPayload, 2);
-        
-        if (response) {
-          Logger.log(`Success with model: ${modelId}`);
-          success = true; // Mark as successful to exit loop
-        }
-      } catch (error) {
-        Logger.log(`Model ${modelId} failed: ${error.toString()}`);
-        lastError = error;
-        
-        // Wait before trying next model (exponential backoff)
-        if (attempt < models.length - 1) {
-          Utilities.sleep(1000 * (attempt + 1)); // 1s, 2s, etc.
-        }
+      // Wait between models
+      if (modelAttempt < models.length - 1 && !success) {
+        Utilities.sleep(1000);
       }
     }
     
     if (!response || !success) {
-      throw new Error('All models failed. Last error: ' + (lastError ? lastError.toString() : 'Unknown'));
+      // Special error message for rate limits
+      if (hit429) {
+        throw new Error('RATE_LIMIT_EXCEEDED');
+      }
+      throw new Error('All models and API keys failed. Last error: ' + (lastError ? lastError.toString() : 'Unknown'));
     }
     
     // Parse the successful response
@@ -213,7 +268,12 @@ function doPost(e) {
     const errorMsg = error.toString();
     let userMessage = '';
     
-    if (errorMsg.includes('503') || errorMsg.includes('overloaded') || errorMsg.includes('UNAVAILABLE')) {
+    // Check for specific error types
+    if (errorMsg.includes('RATE_LIMIT_EXCEEDED') || errorMsg.includes('429')) {
+      userMessage = language === 'en' 
+        ? '⚠️ API rate limit exceeded. Arsen has used up his free API quota. Please try again in a few hours.'
+        : '⚠️ Превышен лимит API. Арсен израсходовал квоту бесплатного API. Пожалуйста, попробуйте через несколько часов.';
+    } else if (errorMsg.includes('503') || errorMsg.includes('overloaded') || errorMsg.includes('UNAVAILABLE')) {
       userMessage = language === 'en' 
         ? 'The AI service is currently busy. Please try again in a moment.'
         : 'Сервис ИИ сейчас перегружен. Пожалуйста, попробуйте через минуту.';
@@ -238,14 +298,95 @@ function doPost(e) {
   }
 }
 
+// Rate limiting function
+function checkRateLimit(e) {
+  try {
+    // Check if user is whitelisted by IP
+    const userIP = e.parameter?.userIP || '';
+    if (WHITELISTED_IPS.includes(userIP)) {
+      Logger.log('Whitelisted IP detected: ' + userIP + ' - bypassing rate limit');
+      return { allowed: true, whitelisted: true };
+    }
+    
+    // Check if accessing from localhost (dev mode)
+    const referrer = e.parameter?.referrer || '';
+    if (ALLOW_LOCALHOST && (referrer.includes('localhost') || referrer.includes('127.0.0.1'))) {
+      Logger.log('Localhost/dev mode detected - bypassing rate limit');
+      return { allowed: true, devMode: true };
+    }
+    
+    // Get user identifier (combination of userId from parameter and IP-like fingerprint)
+    const userId = e.parameter?.userId || e.parameter?.deviceId || 'anonymous';
+    const userAgent = e.parameter?.userAgent || '';
+    
+    // Create unique identifier (combine userId with fingerprint)
+    const userFingerprint = Utilities.computeDigest(
+      Utilities.DigestAlgorithm.MD5,
+      userId + userAgent
+    ).map(byte => (byte < 0 ? byte + 256 : byte).toString(16).padStart(2, '0')).join('');
+    
+    const cache = CacheService.getScriptCache();
+    const now = new Date().getTime();
+    const hourKey = `rate_hour_${userFingerprint}`;
+    const dayKey = `rate_day_${userFingerprint}`;
+    
+    // Get current counts
+    const hourData = cache.get(hourKey);
+    const dayData = cache.get(dayKey);
+    
+    let hourCount = 0;
+    let dayCount = 0;
+    
+    if (hourData) {
+      const parsed = JSON.parse(hourData);
+      hourCount = parsed.count;
+    }
+    
+    if (dayData) {
+      const parsed = JSON.parse(dayData);
+      dayCount = parsed.count;
+    }
+    
+    // Check limits
+    if (hourCount >= MAX_REQUESTS_PER_HOUR) {
+      const lang = e.parameter?.language || 'en';
+      return {
+        allowed: false,
+        message: lang === 'en' 
+          ? `Rate limit exceeded. Maximum ${MAX_REQUESTS_PER_HOUR} requests per hour. Please try again later.`
+          : `Превышен лимит запросов. Максимум ${MAX_REQUESTS_PER_HOUR} запросов в час. Попробуйте позже.`
+      };
+    }
+    
+    if (dayCount >= MAX_REQUESTS_PER_DAY) {
+      const lang = e.parameter?.language || 'en';
+      return {
+        allowed: false,
+        message: lang === 'en'
+          ? `Daily limit reached. Maximum ${MAX_REQUESTS_PER_DAY} requests per day. Please try again tomorrow.`
+          : `Достигнут дневной лимит. Максимум ${MAX_REQUESTS_PER_DAY} запросов в день. Попробуйте завтра.`
+      };
+    }
+    
+    // Increment counters
+    cache.put(hourKey, JSON.stringify({ count: hourCount + 1, timestamp: now }), 3600); // 1 hour
+    cache.put(dayKey, JSON.stringify({ count: dayCount + 1, timestamp: now }), 86400); // 24 hours
+    
+    return { allowed: true };
+    
+  } catch (error) {
+    Logger.log('Rate limit check error: ' + error.toString());
+    // If rate limiting fails, allow the request (fail open)
+    return { allowed: true };
+  }
+}
+
 // Call Gemini API with retry logic (optimized for speed)
 function callGeminiWithRetry(apiUrl, requestPayload, maxRetries) {
   let lastError = null;
   
   for (let retry = 0; retry < maxRetries; retry++) {
     try {
-      Logger.log(`Retry ${retry + 1}/${maxRetries} for ${apiUrl}`);
-      
       const startTime = new Date().getTime();
       
       const response = UrlFetchApp.fetch(apiUrl, {
@@ -254,28 +395,30 @@ function callGeminiWithRetry(apiUrl, requestPayload, maxRetries) {
           'Content-Type': 'application/json'
         },
         payload: JSON.stringify(requestPayload),
-        muteHttpExceptions: true, // Don't throw on HTTP errors
+        muteHttpExceptions: true,
         followRedirects: true
       });
       
       const endTime = new Date().getTime();
-      Logger.log(`Request took ${endTime - startTime}ms`);
-      
       const statusCode = response.getResponseCode();
-      Logger.log(`Response status: ${statusCode}`);
+      
+      Logger.log(`Request took ${endTime - startTime}ms - Status: ${statusCode}`);
       
       if (statusCode === 200) {
         return response; // Success!
-      } else if (statusCode === 503 || statusCode === 429) {
-        // Service unavailable or rate limited - retry with backoff
-        const waitTime = Math.min(2000 * Math.pow(2, retry), 10000); // Max 10 seconds
-        Logger.log(`Service unavailable (${statusCode}), waiting ${waitTime}ms before retry...`);
+      } else if (statusCode === 429) {
+        // Rate limit - DON'T retry, throw immediately so we can try next API key
+        throw new Error(`Rate limit (429) - moving to next API key`);
+      } else if (statusCode === 503) {
+        // Service unavailable - retry with backoff
+        const waitTime = Math.min(1000 * Math.pow(2, retry), 5000); // Max 5 seconds
+        Logger.log(`Service unavailable (503), waiting ${waitTime}ms...`);
         
         if (retry < maxRetries - 1) {
           Utilities.sleep(waitTime);
-          continue; // Retry
+          continue;
         } else {
-          throw new Error(`Service unavailable after ${maxRetries} retries. Status: ${statusCode}`);
+          throw new Error(`Service unavailable after ${maxRetries} retries. Status: 503`);
         }
       } else {
         // Other error - don't retry
@@ -287,14 +430,19 @@ function callGeminiWithRetry(apiUrl, requestPayload, maxRetries) {
       lastError = error;
       const errorMsg = error.toString();
       
+      // If it's a 429, throw immediately
+      if (errorMsg.includes('429') || errorMsg.includes('Rate limit')) {
+        throw error;
+      }
+      
       // Check if it's a timeout or network error
-      if (errorMsg.includes('timeout') || errorMsg.includes('Время ожидания') || errorMsg.includes('Timeout')) {
-        const waitTime = Math.min(2000 * Math.pow(2, retry), 10000);
-        Logger.log(`Timeout error, waiting ${waitTime}ms before retry...`);
+      if (errorMsg.includes('timeout') || errorMsg.includes('Timeout')) {
+        const waitTime = Math.min(1000 * Math.pow(2, retry), 5000);
+        Logger.log(`Timeout error, waiting ${waitTime}ms...`);
         
         if (retry < maxRetries - 1) {
           Utilities.sleep(waitTime);
-          continue; // Retry
+          continue;
         } else {
           throw new Error(`Request timeout after ${maxRetries} retries`);
         }

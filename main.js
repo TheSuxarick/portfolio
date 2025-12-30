@@ -431,8 +431,11 @@
                 });
                 
                 // Debug log
-                console.log('📊 Analytics:', eventType, eventData);
+                console.log('📊 Event tracked:', eventType, eventData);
             }
+            
+            // Make trackEvent globally accessible for chatbot
+            window.trackEvent = trackEvent;
 
             // Track page load - wait for projects to be rendered
             setTimeout(() => {

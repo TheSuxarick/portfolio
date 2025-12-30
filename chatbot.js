@@ -8,8 +8,55 @@ let currentLang = localStorage.getItem('preferredLanguage') || 'en';
 // Conversation history storage
 let conversationHistory = [];
 
+// Generate persistent user ID for rate limiting
+function generateUserId() {
+    const userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    localStorage.setItem('userId', userId);
+    return userId;
+}
+
+// Fetch and store user's public IP (for whitelist checking)
+async function fetchUserIP() {
+    try {
+        // Only fetch if not already stored or if it's been more than 24 hours
+        const lastFetch = localStorage.getItem('ipLastFetch');
+        const now = Date.now();
+        
+        if (!lastFetch || now - parseInt(lastFetch) > 86400000) { // 24 hours
+            const response = await fetch('https://api.ipify.org?format=json');
+            const data = await response.json();
+            if (data.ip) {
+                localStorage.setItem('userIP', data.ip);
+                localStorage.setItem('ipLastFetch', now.toString());
+                console.log('User public IP stored:', data.ip);
+            }
+        }
+    } catch (error) {
+        console.log('Could not fetch IP:', error);
+        // Not critical, just means whitelist by IP won't work
+    }
+}
+
+// Track AI chat in analytics
+function trackAIChat(question, answer, responseTime) {
+    // Check if analytics tracking function exists (from your main analytics code)
+    if (typeof window.trackEvent === 'function') {
+        window.trackEvent('ai_chat', {
+            aiQuestion: question,
+            aiAnswer: answer.substring(0, 1000), // Limit to 1000 chars
+            aiResponseTime: responseTime
+        });
+        console.log('✅ AI Chat tracked:', question.substring(0, 50) + '...');
+    } else {
+        console.error('❌ Analytics tracking not available - window.trackEvent not found');
+    }
+}
+
 // Initialize chatbot
 function initChatbot() {
+    // Fetch user's public IP for whitelist checking (non-blocking)
+    fetchUserIP();
+    
     // Initialize conversation with the welcome message
     const welcomeMessageEn = "Hello, I'm Arsen Kenesbayev\nData Engineer skilled in SQL & Python, passionate about turning data into smart, efficient, and user-friendly solutions.\nAsk my AI any questions about me.";
     const welcomeMessageRu = "Привет, я Арсен Кенесбаев\nИнженер данных, владеющий SQL и Python, увлеченный превращением данных в умные, эффективные и удобные решения.\nЗадайте моему ИИ любые вопросы обо мне.";
@@ -83,6 +130,9 @@ function initChatbot() {
         // Scroll to bottom
         scrollToBottom();
         
+        // Track start time for analytics
+        const startTime = Date.now();
+        
         // Send to API with conversation history
         // Google Apps Script Web Apps handle CORS, but we need to use the right method
         // Using URL-encoded form data works better with Google Apps Script
@@ -90,6 +140,18 @@ function initChatbot() {
         formData.append('question', message);
         formData.append('language', currentLang);
         formData.append('history', JSON.stringify(conversationHistory));
+        
+        // Add device fingerprint for rate limiting
+        const userId = localStorage.getItem('userId') || generateUserId();
+        formData.append('userId', userId);
+        formData.append('userAgent', navigator.userAgent);
+        formData.append('referrer', window.location.href); // For localhost detection
+        
+        // Try to get public IP for whitelist (optional)
+        const userIP = localStorage.getItem('userIP') || '';
+        if (userIP) {
+            formData.append('userIP', userIP);
+        }
         
         fetch(CHATBOT_API_URL, {
             method: 'POST',
@@ -122,11 +184,17 @@ function initChatbot() {
             chatbotLoading.style.display = 'none';
             chatbotSend.disabled = false;
             
+            // Calculate response time
+            const responseTime = Date.now() - startTime;
+            
             // Debug logging
             console.log('Chatbot response:', data);
             
             if (data && data.success) {
                 addMessage(data.answer, 'ai');
+                
+                // Track in analytics
+                trackAIChat(message, data.answer, responseTime);
                 
                 // Add to conversation history
                 conversationHistory.push(
