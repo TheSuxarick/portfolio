@@ -52,6 +52,52 @@
             <p class="lang-ru" style="display: none;">Инженер данных, владеющий SQL и Python, увлеченный превращением данных в умные, эффективные и удобные решения.</p>
             <a href="#projects" class="btn lang-en">View My Projects</a>
             <a href="#projects" class="btn lang-ru" style="display: none;">Посмотреть Проекты</a>
+            
+            <!-- AI Chatbot -->
+            <div class="chatbot-wrapper">
+                <button class="chatbot-toggle-btn" id="chatbotToggle">
+                    <i class="fas fa-robot"></i>
+                    <span class="lang-en">Ask Arsen's AI</span>
+                    <span class="lang-ru" style="display: none;">Спросить ИИ Арсена</span>
+                    <i class="fas fa-chevron-down toggle-icon"></i>
+                </button>
+                <div class="chatbot-container" id="chatbotContainer" style="display: none;">
+                    <div class="chatbot-header">
+                        <div class="chatbot-title">
+                            <i class="fas fa-robot"></i>
+                            <span class="lang-en">Arsen's AI Assistant</span>
+                            <span class="lang-ru" style="display: none;">ИИ-Помощник Арсена</span>
+                        </div>
+                        <span class="experimental-badge lang-en">Under Development</span>
+                        <span class="experimental-badge lang-ru" style="display: none;">Еще ведутся работы над этим</span>
+                    </div>
+                    <div class="chatbot-messages" id="chatbotMessages">
+                        <div class="message ai-message">
+                            <div class="message-avatar">
+                                <i class="fas fa-robot"></i>
+                            </div>
+                            <div class="message-content">
+                                <p class="lang-en">Hello, I'm Arsen Kenesbayev<br>Data Engineer skilled in SQL & Python, passionate about turning data into smart, efficient, and user-friendly solutions.<br><strong>Ask my AI any questions about me.</strong></p>
+                                <p class="lang-ru" style="display: none;">Привет, я Арсен Кенесбаев<br>Инженер данных, владеющий SQL и Python, увлеченный превращением данных в умные, эффективные и удобные решения.<br><strong>Задайте моему ИИ любые вопросы обо мне.</strong></p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chatbot-input-container">
+                        <input type="text" id="chatbotInput" class="chatbot-input lang-en" placeholder="Ask me anything...">
+                        <input type="text" id="chatbotInputRu" class="chatbot-input lang-ru" style="display: none;" placeholder="Спросите что угодно...">
+                        <button id="chatbotSend" class="chatbot-send-btn">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                    <div class="chatbot-loading" id="chatbotLoading" style="display: none;">
+                        <div class="loading-dots">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
         <img src="media/Arsen.jpg" alt="Arsen Kenesbayev" class="profile-img">
     </section>
@@ -179,6 +225,7 @@
     </footer>
     <script src="projects-data.js"></script>
     <script src="project-generator.js"></script>
+    <script src="chatbot.js"></script>
     <script src="main.js"></script>
 </body>
 </html>
